@@ -39,14 +39,17 @@ namespace org.flatbuffers {
             Strings = 65_535,
         }
 
-        // No [A] / [V] / [X] varint attribute appears below, and that is a finding about FlatBuffers rather
-        // than a gap in this converter. FlatBuffers stores every scalar fixed-width and unencoded, so a .fbs
-        // schema never states - and its encoding never implies - where a number's values sit. Declaring a
-        // distribution the source does not know would make the wire larger, not smaller.
-        // Add one by hand wherever you do know the field: [A(min)] for a counter that hugs its floor,
-        // [V(max)] for a remaining budget, [X(amplitude)] for a two-sided delta, [MinMax(a, b)] for a hard
-        // range that should bit-pack. A [Default("100")] below is a hint about the common value, not a
-        // bound, but it is often the clue that tells you which attribute fits.
+        // No [A] / [V] / [X] varint attribute appears below. Not because FlatBuffers stores scalars raw - AdHoc
+        // lays out its own frame and may varint-encode anything - but because a .fbs carries no claim about
+        // WHERE a field's values sit: it has no sint32-versus-fixed32 choice, no declared range, no units. The
+        // physics of each number is therefore yours to state, and it is the single highest-value edit to make
+        // to this file. Fields whose name or documentation does hint at an answer carry a `// physics:` line
+        // naming the candidate and the reason; the choice is deliberately left open.
+        //   [A(min)] floor, rare excursions up     [V(max)] hugs a ceiling
+        //   [X(amplitude)] two-sided around zero   [MinMax(a, b)] hard range, bit-packed, no varint
+        // Check the arithmetic first: varint pays while the typical distance from the base stays under about
+        // two million, and always loses past 268 435 455 - so timestamps, scaled coordinates, monotonic ids
+        // and hashes are losses at a zero base. A span under one byte is rejected; use [MinMax] there.
 
         /** root_type / file_identifier / file_extension of the schema (non-transmittable constants). */
         public struct FlatBufferFile {
@@ -224,6 +227,7 @@ namespace org.flatbuffers {
                 public class Stat {
                     string id;
                     long val;
+                    // physics: an element count, floor at 0, unbounded above -> consider [A]
                     [SortKey] ushort count;
                 }
 
@@ -268,13 +272,21 @@ namespace org.flatbuffers {
                     [FieldId(13), User("nested_flatbuffer", "Monster")] Binary[,,] testnestedflatbuffer;
                     [FieldId(14)] MyGame.Example.Stat testempty;
                     [FieldId(15)] bool testbool;
+                    // physics: identifier or digest, values spread across the whole range -> varint would enlarge every packet; leave it fixed-width
                     [FieldId(16), User("hash", "fnv1_32")] int testhashs32_fnv1;
+                    // physics: identifier or digest, values spread across the whole range -> varint would enlarge every packet; leave it fixed-width
                     [FieldId(17), User("hash", "fnv1_32")] uint testhashu32_fnv1;
+                    // physics: identifier or digest, values spread across the whole range -> varint would enlarge every packet; leave it fixed-width
                     [FieldId(18), User("hash", "fnv1_64")] long testhashs64_fnv1;
+                    // physics: identifier or digest, values spread across the whole range -> varint would enlarge every packet; leave it fixed-width
                     [FieldId(19), User("hash", "fnv1_64")] ulong testhashu64_fnv1;
+                    // physics: identifier or digest, values spread across the whole range -> varint would enlarge every packet; leave it fixed-width
                     [FieldId(20), User("hash", "fnv1a_32")] int testhashs32_fnv1a;
+                    // physics: identifier or digest, values spread across the whole range -> varint would enlarge every packet; leave it fixed-width
                     [FieldId(21), User("hash", "fnv1a_32"), User("cpp_type", "Stat")] uint testhashu32_fnv1a;
+                    // physics: identifier or digest, values spread across the whole range -> varint would enlarge every packet; leave it fixed-width
                     [FieldId(22), User("hash", "fnv1a_64")] long testhashs64_fnv1a;
+                    // physics: identifier or digest, values spread across the whole range -> varint would enlarge every packet; leave it fixed-width
                     [FieldId(23), User("hash", "fnv1a_64")] ulong testhashu64_fnv1a;
                     [Default("3.14159"), FieldId(25)] float testf;
                     [Default("3"), FieldId(26)] float testf2;

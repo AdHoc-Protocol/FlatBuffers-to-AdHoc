@@ -49,6 +49,65 @@ including file, its ancestors, and finally any file under the input root with a 
 for `flatc -I`), merged, and one self-contained `<name>.cs` is written (`namespace org.flatbuffers`,
 `interface <name>`). Output defaults to `<cwd>/AdHoc`.
 
+## Before and after
+
+Apache Arrow's IPC metadata schema, [`samples/arrow/Schema.fbs`](samples/arrow/Schema.fbs), 580 lines — the
+largest real schema in `samples/`, and the fairest one to judge the output by because it exercises tables, enums,
+unions, documentation and defaults at once. Result: [`AdHoc/Schema.cs`](AdHoc/Schema.cs).
+
+```fbs
+table Int {
+  bitWidth: int; // restricted to 8, 16, 32, and 64 in v1
+  is_signed: bool;
+}
+
+enum Precision:short {HALF, SINGLE, DOUBLE}
+
+table FloatingPoint {
+  precision: Precision;
+}
+
+/// Unicode with UTF-8 encoding
+table Utf8 {
+}
+
+/// Opaque binary data
+table Binary {
+}
+// ... 560 further lines
+```
+
+```csharp
+public class Int {
+    /**
+    restricted to 8, 16, 32, and 64 in v1
+    */
+    // physics: an index or a small ordinal, floor at 0 -> consider [A], or [MinMax(a, b)] if you know a hard ceiling
+    int bitWidth;
+    bool is_signed;
+}
+
+/**
+FlatBuffers base type: short
+*/
+public enum Precision {
+    HALF = 0,
+    SINGLE = 1,
+    DOUBLE = 2,
+}
+
+public class FloatingPoint {
+    org.apache.arrow.flatbuf.Precision precision;
+}
+// ... Utf8, Binary and the rest of the namespace, then the hosts and the connection
+```
+
+The trailing `//` comment became the field's documentation and the `///` comment the pack's; `Precision` kept its
+declared order while its `short` base type moved into the doc, because AdHoc sizes an enum from its own values;
+the field type is written as the full path `org.apache.arrow.flatbuf.Precision`, which is what lets Arrow's own
+`Binary` and `Map` keep their names beside `org.unirail.Meta`'s; and `bitWidth` carries the one thing the schema
+hints at but cannot state — see *Number encoding* below.
+
 ## Mapping
 
 | FlatBuffers                               | AdHoc                                                                                   |
@@ -78,10 +137,13 @@ and one non-transitional `_____lr_____` state `Exchange` that lists every table 
 either side may send it. Tables used as RPC request/response are deliberately kept out of `Exchange`: an
 always-active state and an RPC actor claiming the same pack on the same host side would be an FSM ambiguity.
 
-**Naming:** identifiers go through the agent's own keyword rule (`type` → `Type`); names that would shadow
-`org.unirail.Meta` types get a numeric suffix (Arrow's `table Binary` → `Binary2`, `Map` → `Map2`,
-`Duration` → `Duration2`); a trailing underscore is dropped (`Struct_` → `Struct`); a schema named like a
-Meta type (`File.fbs`) is written as `arrow_File.cs`.
+**Naming:** identifiers go through the agent's own keyword rule, so a field named `type` becomes `Type`; a
+trailing underscore is dropped, so Arrow's `table Struct_` becomes `Struct`; a namespace container that would
+collide with the project interface takes a numeric suffix (`optional_scalars` → `optional_scalars2`); and a
+schema file named after an `org.unirail.Meta` type is written under a qualified name (`arrow/File.fbs` →
+`arrow_File.cs`). Types that would shadow a Meta type are renamed only at the project's root scope — Arrow's
+`Binary`, `Map` and `Duration` sit inside the `org.apache.arrow.flatbuf` container and are referenced by full
+path, so they keep their own names.
 
 ## Lengths: one `_DefaultMaxLengthOf`, not an invented `[D(N)]` everywhere
 
@@ -97,27 +159,46 @@ and `[D(N)]` is emitted **only** for fixed arrays `[T:N]`, the one length the sc
 is honest; stamping a made-up per-field bound is not. Tighten individual fields by hand where you know the real
 maximum — that is where AdHoc starts paying off.
 
-## Number encoding: no `[A]` / `[V]` / `[X]`, and that is the finding
+## Number encoding: no attribute invented, but the question is never dropped
 
-AdHoc's headline capability is declaring *where a number's values sit* so the wire carries the distance from
-that point instead of the magnitude. **A FlatBuffers schema cannot feed it.** FlatBuffers stores every scalar
-fixed-width and unencoded at a fixed vtable offset — that is the format's whole design, the reason it reads
-without parsing. So a `.fbs` file never states, and its encoding never implies, a distribution: an `int` is just
-an `int`. Compare the protobuf converter, where `sint32` *is* a statement (zigzag varint → `[X] int`) and
-`uint32` another (`[A] uint`), while `fixed32` correctly yields no attribute at all — FlatBuffers is `fixed32`
-all the way down.
+AdHoc's headline capability is declaring *where a number's values sit*, so the wire carries the distance from
+that point instead of the magnitude. The converter emits no `[A]`/`[V]`/`[X]` — and the reason is narrower than
+it first looks.
 
-Emitting `[A]`/`[V]`/`[X]` anyway would be a guess, and a guess here is not neutral: varint on a uniformly
-distributed field spends a continuation bit per byte and makes the message **larger**, and the generator rejects
-a span too narrow to pay off. So the converter emits none, and every generated file carries a comment block
-saying so, listing what to add by hand once you know the field:
+It is **not** that FlatBuffers stores scalars fixed-width. How the source framed its bytes says nothing about
+what AdHoc should do: AdHoc lays out its own frame and is free to varint-encode a field FlatBuffers stored raw.
+Confusing the input encoding with the output one would be the wrong argument.
 
-| You know the field is… | Add |
-|:--|:--|
-| a counter or sequence number hugging its floor | `[A(min)]` |
-| a remaining budget / lease hugging its ceiling | `[V(max)]` |
-| a two-sided delta around a centre | `[X(amplitude, zero)]` |
-| a hard range that should bit-pack | `[MinMax(a, b)]` |
+The honest statement is about *claims*: **a `.fbs` carries no claim about where the values sit.** It offers no
+`sint32`-versus-`fixed32` choice (which in protobuf really is the author saying "this clusters near zero"), no
+declared range, no units, no invalid marker. So the physics of each number is yours to state, and stating it is
+the single highest-value edit to make to a generated file.
+
+A `.fbs` does, however, **hint**. Every FlatBuffers scalar has `0` as its default, explicit or implicit, so zero
+is an ordinary value by the schema's own account; and names and `///` documentation usually say what the number
+counts. Wherever such a hint exists and the field is an integer wider than one byte, the converter writes a
+comment on the field naming the candidate and the reason — never the attribute:
+
+```csharp
+// physics: an element count, floor at 0, unbounded above -> consider [A]
+int listSize;
+// physics: a byte offset, floor at 0 but often huge -> [A] pays only while offsets stay under ~2 million
+long offset;
+// physics: identifier or digest, values spread across the whole range -> varint would enlarge every packet
+long id;
+```
+
+90 such lines appear across the 13 samples: element counts and indexes (`[A]` candidates), byte offsets and
+absolute times (flagged as likely losses at a zero base), hashes and identifiers (flagged as losses outright),
+and a few fields whose prose documents non-negativity.
+
+**The arithmetic, once.** Varint drops leading zero groups and spends one bit in eight on a continuation flag, so
+everything turns on the distance from the base you declare. Against a fixed 4-byte field it wins while that
+distance stays under roughly **2 000 000**, breaks even to 268 435 455, and **always loses beyond 268 435 455**.
+That is why a Unix timestamp in seconds, a coordinate scaled by 1e7, a monotonic id past a quarter-billion and a
+uniformly spread hash all cost *more* as varints at a zero base — and why moving the base under the values, or
+using `[MinMax(a, b)]` for a hard range, is usually the real fix. A span narrower than one byte the generator
+rejects outright; that field wants `[MinMax]`, which bit-packs below what varint can reach.
 
 A `[Default("100")]` carried over from the schema is a hint about the *common* value, not a bound — but it is
 often exactly the clue that tells you which attribute fits.
@@ -171,8 +252,8 @@ live inside it and the exchange state lists its packs explicitly rather than usi
 
 - Collection caps are the file-wide 65_535 of `_DefaultMaxLengthOf`, not per-field truths; tighten the fields
   whose real maximum you know, which is also where `[MinMax]` bit-packing becomes available.
-- No distribution attributes are emitted, by design — see *Number encoding* above. Adding them by hand is the
-  single highest-value refinement of a generated file.
+- No distribution attributes are emitted; hinted fields carry a `// physics:` comment instead — see *Number
+  encoding* above. Acting on those comments is the single highest-value refinement of a generated file.
 - A union is modelled as a pack of optional fields; nothing enforces "exactly one set" at the schema level.
 - `nested_flatbuffer` / `flexbuffer` payloads stay opaque `Binary[,,]`; the attribute is preserved as `[User]`
   and a `DROPPED:` note is written into the field's doc comment naming what AdHoc would do instead.

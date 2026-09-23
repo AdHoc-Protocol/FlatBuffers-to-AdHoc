@@ -14,6 +14,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -709,14 +710,17 @@ public class FlatBuffers2AdHoc {
 		 * format, not an omission of the converter, so it belongs where the reader will look for it.
 		 */
 		void encodingNote() {
-			sb.append('\n').append(I2).append("// No [A] / [V] / [X] varint attribute appears below, and that is a finding about FlatBuffers rather\n");
-			sb.append(I2).append("// than a gap in this converter. FlatBuffers stores every scalar fixed-width and unencoded, so a .fbs\n");
-			sb.append(I2).append("// schema never states - and its encoding never implies - where a number's values sit. Declaring a\n");
-			sb.append(I2).append("// distribution the source does not know would make the wire larger, not smaller.\n");
-			sb.append(I2).append("// Add one by hand wherever you do know the field: [A(min)] for a counter that hugs its floor,\n");
-			sb.append(I2).append("// [V(max)] for a remaining budget, [X(amplitude)] for a two-sided delta, [MinMax(a, b)] for a hard\n");
-			sb.append(I2).append("// range that should bit-pack. A [Default(\"100\")] below is a hint about the common value, not a\n");
-			sb.append(I2).append("// bound, but it is often the clue that tells you which attribute fits.\n");
+			sb.append('\n').append(I2).append("// No [A] / [V] / [X] varint attribute appears below. Not because FlatBuffers stores scalars raw - AdHoc\n");
+			sb.append(I2).append("// lays out its own frame and may varint-encode anything - but because a .fbs carries no claim about\n");
+			sb.append(I2).append("// WHERE a field's values sit: it has no sint32-versus-fixed32 choice, no declared range, no units. The\n");
+			sb.append(I2).append("// physics of each number is therefore yours to state, and it is the single highest-value edit to make\n");
+			sb.append(I2).append("// to this file. Fields whose name or documentation does hint at an answer carry a `// physics:` line\n");
+			sb.append(I2).append("// naming the candidate and the reason; the choice is deliberately left open.\n");
+			sb.append(I2).append("//   [A(min)] floor, rare excursions up     [V(max)] hugs a ceiling\n");
+			sb.append(I2).append("//   [X(amplitude)] two-sided around zero   [MinMax(a, b)] hard range, bit-packed, no varint\n");
+			sb.append(I2).append("// Check the arithmetic first: varint pays while the typical distance from the base stays under about\n");
+			sb.append(I2).append("// two million, and always loses past 268 435 455 - so timestamps, scaled coordinates, monotonic ids\n");
+			sb.append(I2).append("// and hashes are losses at a zero base. A span under one byte is rejected; use [MinMax] there.\n");
 		}
 
 		/** Emits every declaration, grouped by namespace into nested containers (each container opened once). */
@@ -793,6 +797,7 @@ public class FlatBuffers2AdHoc {
 			String type;
 			TypeRef t = f.type;
 			boolean optionalScalar = "null".equals(f.dflt);
+			String elementType = SCALARS.getOrDefault(t.base, ""); // bare C# scalar, "" for string / enum / pack
 			if (t.isString()) type = "string";
 			else if (t.isScalar()) type = SCALARS.get(t.base) + (optionalScalar ? "?" : "");
 			else {
@@ -840,9 +845,65 @@ public class FlatBuffers2AdHoc {
 			}
 
 			doc(sb, indent, docs.toString());
+			// The physics of the field is the developer's call; the converter's job is not to drop the question.
+			String physics = physicsHint(f, elementType, t.vector || t.fixedLen >= 0);
+			if (physics != null) sb.append(indent).append("// physics: ").append(physics).append('\n');
 			String name = fieldNames.contains(ident(f.name)) ? AdHocWriter.unique(f.name + "_field", fieldNames) : AdHocWriter.unique(f.name, fieldNames);
 			sb.append(indent).append(attrs.isEmpty() ? "" : "[" + String.join(", ", attrs) + "] ").append(type).append(' ').append(name).append(';').append(comment).append('\n');
 		}
+
+		/**
+		 * A {@code .fbs} makes no claim about where a number's values sit — it has no `sint32`-versus-`fixed32`
+		 * choice, no declared range, no units. It does, however, <b>hint</b>: a field's name and its {@code ///}
+		 * documentation usually say what the number counts, and every FlatBuffers scalar has 0 as its default,
+		 * explicit or implicit, so "zero is an ordinary value here" is the schema's own statement.
+		 *
+		 * <p>This returns a comment naming the candidate attribute and the reason, or {@code null} when the schema
+		 * gives no honest signal. It never emits the attribute itself: varint is a decision about real traffic, and
+		 * only the person who owns the data can take it. See README §"Number encoding" for the arithmetic.
+		 *
+		 * @param cs         the C# element type; only integers wider than one byte can carry a varint attribute
+		 * @param collection true when the attribute would apply to the elements rather than to a single value
+		 */
+		static String physicsHint(Field f, String cs, boolean collection) {
+			if (!VARINT_CAPABLE.contains(cs)) return null; // bool/byte/sbyte/float/double/string/enum/pack: rejected by the generator
+			String n = f.name.toLowerCase(Locale.ROOT);
+			String d = f.doc == null ? "" : f.doc.toLowerCase(Locale.ROOT);
+			String on = collection ? " (on the elements)" : "";
+			boolean signed = cs.charAt(0) != 'u';
+
+			// Ordered so that a name which is both (`hash_index`, `timestamp_offset`) lands on the losing side first.
+			if (matches(n, "hash", "checksum", "crc", "uuid", "guid", "digest", "signature", "seed", "random", "token", "nonce", "salt"))
+				return "identifier or digest, values spread across the whole range -> varint would enlarge every packet; leave it fixed-width" + on;
+			if (matches(n, "timestamp", "epoch", "unixtime", "nanos", "nanosecond", "micros", "microsecond", "millis", "millisecond") || matches(d, "since the epoch", "unix epoch"))
+				return "an absolute time, systematically large -> a zero base makes varint lose; model the value as DateTime or a `class X : Duration` alias (README section Time), or give [A] a real base" + on;
+			if (matches(n, "delta", "diff", "difference", "error", "adjust", "correction", "drift", "skew", "bias", "residual"))
+				return "a two-sided quantity centred on zero -> consider [X(amplitude)] once you know the typical swing" + on;
+			if (matches(n, "remaining", "available", "headroom", "budget", "lease", "ttl", "credit", "quota"))
+				return "a value that hugs its ceiling -> consider [V(max)]" + on;
+			if (matches(n, "percent", "percentage", "ratio") || matches(d, "percent"))
+				return "a percentage, a hard range -> consider [MinMax(0, 100)], which bit-packs instead of varint" + on;
+			if (matches(n, "offset", "address", "pointer", "location"))
+				return "a byte offset, floor at 0 but often huge -> [A] pays only while offsets stay under ~2 million (README section Number encoding)" + on;
+			if (matches(n, "count", "length", "len", "size", "num", "number", "capacity", "total", "nodes", "buffers", "records", "bodylength"))
+				return "an element count, floor at 0, unbounded above -> consider [A]" + on;
+			if (matches(n, "index", "ordinal", "position", "depth", "level", "rank", "order", "sequence", "seq", "version", "bitwidth", "precision", "scale"))
+				return "an index or a small ordinal, floor at 0 -> consider [A], or [MinMax(a, b)] if you know a hard ceiling" + on;
+			// Nothing in the name: fall back to what the prose says outright.
+			if (matches(d, "non-negative", "nonnegative", "must be positive", "must be greater than or equal to 0", "greater than zero", "must be >= 0"))
+				return "documented as non-negative, floor at 0 -> consider [A]" + on;
+			if (signed && matches(d, "may be negative", "can be negative", "negative values"))
+				return "documented as two-sided -> consider [X(amplitude)]" + on;
+			return null;
+		}
+
+		static boolean matches(String haystack, String... needles) {
+			for (String x : needles) if (haystack.contains(x)) return true;
+			return false;
+		}
+
+		/** Integers wider than one byte: the only types AdHoc lets a varint attribute sit on. */
+		static final Set<String> VARINT_CAPABLE = new HashSet<>(Arrays.asList("short", "ushort", "int", "uint", "long", "ulong"));
 
 		void enumDecl(Decl d, String indent) {
 			String cs = SCALARS.getOrDefault(d.baseType, "int");
