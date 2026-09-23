@@ -1,0 +1,181 @@
+# FlatBuffers-to-AdHoc — FlatBuffers schemas → AdHoc protocol description
+
+> One of the [**converters to AdHoc protocol**](https://github.com/AdHoc-Protocol#converters-to-adhoc-protocol).
+> Take a protocol you already have, get an [AdHoc](https://github.com/AdHoc-Protocol/AdHoc-protocol) description,
+> open it in the Observer. The result is a starting point you refine by hand, not a finished protocol.
+
+Translates [FlatBuffers](https://flatbuffers.dev/) schema files into [AdHoc](https://github.com/AdHoc-Protocol)
+protocol-description `.cs` files, as a starting point for migrating a FlatBuffers-based protocol to AdHoc.
+The project is self-contained: a single Java 17 class plus a local copy of the AdHoc emitter helpers.
+
+## Links
+
+| What                                   | Where                                                                                        |
+|:---------------------------------------|:---------------------------------------------------------------------------------------------|
+| FlatBuffers schema language (spec)     | https://flatbuffers.dev/schema/                                                              |
+| FlatBuffers repository (`flatc`, tests) | https://github.com/google/flatbuffers                                                        |
+| Sample schemas: google/flatbuffers     | https://github.com/google/flatbuffers/tree/master/samples , …/tree/master/tests , …/tree/master/reflection |
+| Sample schemas: Apache Arrow IPC format | https://github.com/apache/arrow/tree/main/format (`Schema.fbs`, `Message.fbs`, `File.fbs`, `Tensor.fbs`, `SparseTensor.fbs`) |
+| AdHoc protocol description format      | https://github.com/AdHoc-Protocol/AdHoc-protocol (README: *Protocol Description File Format*) |
+| AdHocAgent (validation / code generation) | https://github.com/AdHoc-Protocol/AdHoc-protocol                                                     |
+
+## Layout
+
+| Path                                       | Contents                                                        |
+|:-------------------------------------------|:----------------------------------------------------------------|
+| `src/org/unirail/FlatBuffers2AdHoc.java`   | tokenizer, recursive-descent `.fbs` parser, AdHoc emitter        |
+| `src/org/unirail/adhoc/AdHocWriter.java`   | local copy of the AdHoc emitter helpers (naming, docs, skeleton) |
+| `src/org/unirail/adhoc/Json.java`          | local copy of the JSON reader (unused here, kept for uniformity) |
+| `fetch-samples.sh`                         | downloads the sample schemas into `samples/` (upstream layout kept so `include` resolves) |
+| `build.sh`                                 | compiles and converts `samples/` into `AdHoc/`                   |
+| `validate.sh`                              | runs AdHocAgent in parse-only mode over `AdHoc/*.cs`             |
+| `samples/`                                 | 13 upstream schemas (8 from google/flatbuffers, 5 from Apache Arrow) |
+| `AdHoc/`                                   | generated descriptors + `*.branches.txt` dumps from validation   |
+
+## Usage
+
+```bash
+./fetch-samples.sh                     # samples/flatbuffers/…, samples/arrow/…
+./build.sh                             # javac + java … samples AdHoc
+./validate.sh AdHoc                    # every file must print OK
+
+# by hand:
+javac -encoding UTF-8 --release 17 -d out src/org/unirail/adhoc/*.java src/org/unirail/*.java
+java -Dfile.encoding=UTF-8 -cp out org.unirail.FlatBuffers2AdHoc <file.fbs | folder> [output folder]
+```
+
+Every `.fbs` found under the input folder is a top-level schema: its `include`s are resolved (relative to the
+including file, its ancestors, and finally any file under the input root with a matching path suffix, standing in
+for `flatc -I`), merged, and one self-contained `<name>.cs` is written (`namespace org.flatbuffers`,
+`interface <name>`). Output defaults to `<cwd>/AdHoc`.
+
+## Mapping
+
+| FlatBuffers                               | AdHoc                                                                                   |
+|:------------------------------------------|:----------------------------------------------------------------------------------------|
+| `namespace a.b.c;`                        | nested non-transmittable `public struct a { public struct b { public struct c { … } } }` containers; types are referenced by full path, so equally named types of different namespaces coexist (`MyGame.Example.Monster` vs `MyGame.Example2.Monster`) |
+| `table T { … }`                           | `public class T { … }` pack; non-scalar fields are optional by AdHoc's nature            |
+| `struct S { … }`                          | `public class S { … }` pack, documented as fixed-layout; `(force_align: N)` → `[ForceAlign(N)]` |
+| `enum E : t { … }`                        | `public enum E { … }` with explicit values; `: long` / `: ulong` only when values need it (the base type is documented in the doc comment, AdHoc sizes enums from their value range) |
+| `enum E : t (bit_flags) { A = 0, B, C = 3 }` | `[Flags] enum E { A = 1, B = 2, C = 8 }` — bit indexes become bit values                |
+| enum with < 2 values                      | `public struct E { public const int V = n; }` constants container (AdHoc rejects such enums); fields typed with it keep the primitive base type |
+| `union U { A, alias: B, S: string }`      | `public class U { A A; B alias; string S; }` — one optional field per alternative, exactly one is expected to be set |
+| scalars `bool byte ubyte short ushort int uint long ulong float double` (+ `int8`…`float64` aliases) | `bool sbyte byte short ushort int uint long ulong float double` |
+| `string`                                  | `string`                                                                                |
+| `[T]` vector                              | `T[,,]` (list, no `[D]`: the cap comes from the file's `_DefaultMaxLengthOf`); `[ubyte]` / `[uint8]` → `Binary[,,]` |
+| `[T:N]` fixed array (structs)             | `[D(N)] T[]` — the only length a `.fbs` actually states                                  |
+| field `= null` (optional scalar)          | `T?`                                                                                    |
+| field `= value` (scalar / enum default)   | `[Default("value")]` (as written: `100`, `Blue`, `true`, `nan`, `+inf`)                   |
+| `(id: N)` / `(deprecated)` / `(required)` / `(key)` | `[FieldId(N)]` / `[Deprecated]` + doc note / `[Required]` / `[SortKey]`           |
+| any other attribute (`hash`, `nested_flatbuffer`, `flexbuffer`, `cpp_type`, user-declared …) | `[User("name", "value")]` (multiple allowed) |
+| field typed with an empty table/struct    | `bool` presence flag (what AdHoc does anyway, done explicitly to avoid the agent's warning) |
+| `rpc_service S { M(Req):Rsp (streaming: "server"); }` | `(L____________, Rsp) M(Req req);` inside the connection — Client calls, Server answers; the service name and `streaming`/`idempotent` metadata go to the method's doc |
+| `root_type`, `file_identifier`, `file_extension` | `public struct FlatBufferFile { const string … }`                                   |
+| `///` doc comments, `//` comments directly attached to a declaration | `/** … */` doc comments (XML-escaped)                            |
+
+**Topology:** hosts `Client` and `Server`; `interface Connection : Connects<Client, Server>` holds the RPC methods
+and one non-transitional `_____lr_____` state `Exchange` that lists every table not owned by an RPC method, so
+either side may send it. Tables used as RPC request/response are deliberately kept out of `Exchange`: an
+always-active state and an RPC actor claiming the same pack on the same host side would be an FSM ambiguity.
+
+**Naming:** identifiers go through the agent's own keyword rule (`type` → `Type`); names that would shadow
+`org.unirail.Meta` types get a numeric suffix (Arrow's `table Binary` → `Binary2`, `Map` → `Map2`,
+`Duration` → `Duration2`); a trailing underscore is dropped (`Struct_` → `Struct`); a schema named like a
+Meta type (`File.fbs`) is written as `arrow_File.cs`.
+
+## Lengths: one `_DefaultMaxLengthOf`, not an invented `[D(N)]` everywhere
+
+FlatBuffers vectors and strings are unbounded. AdHoc caps collections at 255 items by default, which would
+silently truncate real payloads, so every generated file opens with
+
+```csharp
+enum _DefaultMaxLengthOf { Arrays = 65_535, Maps = 65_535, Sets = 65_535, Strings = 65_535, }
+```
+
+and `[D(N)]` is emitted **only** for fixed arrays `[T:N]`, the one length the schema language really states
+(11 occurrences across the 13 samples, all from `arrays_test.fbs`). Raising a ceiling the source never mentions
+is honest; stamping a made-up per-field bound is not. Tighten individual fields by hand where you know the real
+maximum — that is where AdHoc starts paying off.
+
+## Number encoding: no `[A]` / `[V]` / `[X]`, and that is the finding
+
+AdHoc's headline capability is declaring *where a number's values sit* so the wire carries the distance from
+that point instead of the magnitude. **A FlatBuffers schema cannot feed it.** FlatBuffers stores every scalar
+fixed-width and unencoded at a fixed vtable offset — that is the format's whole design, the reason it reads
+without parsing. So a `.fbs` file never states, and its encoding never implies, a distribution: an `int` is just
+an `int`. Compare the protobuf converter, where `sint32` *is* a statement (zigzag varint → `[X] int`) and
+`uint32` another (`[A] uint`), while `fixed32` correctly yields no attribute at all — FlatBuffers is `fixed32`
+all the way down.
+
+Emitting `[A]`/`[V]`/`[X]` anyway would be a guess, and a guess here is not neutral: varint on a uniformly
+distributed field spends a continuation bit per byte and makes the message **larger**, and the generator rejects
+a span too narrow to pay off. So the converter emits none, and every generated file carries a comment block
+saying so, listing what to add by hand once you know the field:
+
+| You know the field is… | Add |
+|:--|:--|
+| a counter or sequence number hugging its floor | `[A(min)]` |
+| a remaining budget / lease hugging its ceiling | `[V(max)]` |
+| a two-sided delta around a centre | `[X(amplitude, zero)]` |
+| a hard range that should bit-pack | `[MinMax(a, b)]` |
+
+A `[Default("100")]` carried over from the schema is a hint about the *common* value, not a bound — but it is
+often exactly the clue that tells you which attribute fits.
+
+## Time: nothing here qualifies, and the reason is specific
+
+FlatBuffers has no temporal type, so the only candidates are Arrow's `Timestamp`, `Date`, `Time`, `Duration`
+and `Interval` tables in `Schema.fbs`. **None of them carries a time value**, and mapping them to AdHoc
+`DateTime` would be a category error. They are logical-**type descriptors**: `Timestamp` holds a `unit` and a
+`timezone` string, `Duration` holds only a `unit`. They describe how a *column* of an Arrow record batch is to
+be read; the instants themselves live in Arrow's binary buffers, which never travel through this schema.
+
+Even the resolution cannot be pinned at generation time: `unit: TimeUnit` is a runtime value, so there is no
+constant to put in a `class X : Duration { precision; }` alias. (Contrast protobuf, where
+`google.protobuf.Timestamp` *is* an instant and `Duration` *is* an elapsed span, both with fixed nanosecond
+resolution — which is why the protobuf converter maps them to `DateTime` and a `Duration` alias.)
+
+The remaining eight samples contain no time-valued field at all; the single time-ish name in the whole corpus is
+Arrow's `timezone: string`, which is a zone name.
+
+So each of the five Arrow tables is emitted as an ordinary pack **with a comment naming the AdHoc type its
+described values would use** — `DateTime`, `DateTimeDef`, `TimeSpanDef`, `Duration` — so whoever models the
+Arrow data itself is pointed straight at them:
+
+```csharp
+// Left as an ordinary pack on purpose: this table describes the logical time type of an Arrow column
+// (its unit, its timezone) and never carries a time value — those live in Arrow's binary buffers,
+// outside this schema. When you model the values themselves, a wall-clock instant is `DateTime`, or
+// `class T : DateTimeDef { min; max; precision; }` when the epoch and resolution are pinned.
+public class Timestamp { … }
+```
+
+## Validation
+
+All 13 generated descriptors pass `./validate.sh AdHoc` (AdHocAgent `ADHOC_PARSE_ONLY=1`, no errors or warnings):
+
+```
+Message OK   Schema OK   SparseTensor OK   Tensor OK   arrays_test OK   arrow_File OK   include_test1 OK
+include_test2 OK   monster OK   monster_test OK   optional_scalars OK   reflection OK   union_vector OK
+```
+
+`AdHoc/monster_test.branches.txt` shows the four `MonsterStorage` methods as separate Call/Return actors and the
+seven remaining tables in `Exchange`.
+
+Two agent behaviours shaped the output and are worth knowing: the agent's constant reader cannot narrow an
+integer literal to `short`/`sbyte`, so enums are emitted without a narrow base type and single-value enums use
+`const int`; and a class placed outside the project interface crashes the agent, so the custom attribute classes
+live inside it and the exchange state lists its packs explicitly rather than using a recursive `@scope`.
+
+## Limitations
+
+- Collection caps are the file-wide 65_535 of `_DefaultMaxLengthOf`, not per-field truths; tighten the fields
+  whose real maximum you know, which is also where `[MinMax]` bit-packing becomes available.
+- No distribution attributes are emitted, by design — see *Number encoding* above. Adding them by hand is the
+  single highest-value refinement of a generated file.
+- A union is modelled as a pack of optional fields; nothing enforces "exactly one set" at the schema level.
+- `nested_flatbuffer` / `flexbuffer` payloads stay opaque `Binary[,,]`; the attribute is preserved as `[User]`
+  and a `DROPPED:` note is written into the field's doc comment naming what AdHoc would do instead.
+- `rpc_service` streaming modes have no AdHoc RPC equivalent; they are recorded in the method's documentation.
+- Field order and `(id: N)` slot order are kept as declared; FlatBuffers' vtable layout is not relevant to AdHoc.
+- JSON objects embedded in a schema file are skipped.
