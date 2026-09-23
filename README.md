@@ -56,57 +56,69 @@ largest real schema in `samples/`, and the fairest one to judge the output by be
 unions, documentation and defaults at once. Result: [`AdHoc/Schema.cs`](AdHoc/Schema.cs).
 
 ```fbs
-table Int {
-  bitWidth: int; // restricted to 8, 16, 32, and 64 in v1
-  is_signed: bool;
-}
+table Field {
+  /// Name is not required (e.g., in a List)
+  name: string;
 
-enum Precision:short {HALF, SINGLE, DOUBLE}
+  /// Whether or not this field can contain nulls. Should be true in general.
+  nullable: bool;
 
-table FloatingPoint {
-  precision: Precision;
-}
+  /// This is the type of the decoded value if the field is dictionary encoded.
+  type: Type;
+  // ... dictionary ...
 
-/// Unicode with UTF-8 encoding
-table Utf8 {
-}
+  /// children apply only to nested data types like Struct, List and Union. For
+  /// primitive types children will have length 0.
+  children: [ Field ];
 
-/// Opaque binary data
-table Binary {
+  /// User-defined metadata
+  custom_metadata: [ KeyValue ];
 }
-// ... 560 further lines
+// ... 320 further lines ...
+table Decimal {
+  /// Total number of decimal digits
+  precision: int;
+  // ... scale, and bitWidth's own two doc lines ...
+  bitWidth: int = 128;
+}
 ```
 
 ```csharp
-public class Int {
+public class Field {
     /**
-    restricted to 8, 16, 32, and 64 in v1
+    Name is not required (e.g., in a List)
     */
+    string name;
+    // ... nullable, dictionary ...
+    /**
+    This is the type of the decoded value if the field is dictionary encoded.
+    */
+    org.apache.arrow.flatbuf.Type Type;
+    /**
+    children apply only to nested data types like Struct, List and Union. For
+    primitive types children will have length 0.
+    */
+    org.apache.arrow.flatbuf.Field[,,] children;
+    /**
+    User-defined metadata
+    */
+    org.apache.arrow.flatbuf.KeyValue[,,] custom_metadata;
+}
+// ...
+public class Decimal {
+    // ... precision, scale and their docs ...
     // physics: an index or a small ordinal, floor at 0 -> consider [A], or [MinMax(a, b)] if you know a hard ceiling
-    int bitWidth;
-    bool is_signed;
+    [Default("128")] int bitWidth;
 }
-
-/**
-FlatBuffers base type: short
-*/
-public enum Precision {
-    HALF = 0,
-    SINGLE = 1,
-    DOUBLE = 2,
-}
-
-public class FloatingPoint {
-    org.apache.arrow.flatbuf.Precision precision;
-}
-// ... Utf8, Binary and the rest of the namespace, then the hosts and the connection
 ```
 
-The trailing `//` comment became the field's documentation and the `///` comment the pack's; `Precision` kept its
-declared order while its `short` base type moved into the doc, because AdHoc sizes an enum from its own values;
-the field type is written as the full path `org.apache.arrow.flatbuf.Precision`, which is what lets Arrow's own
-`Binary` and `Map` keep their names beside `org.unirail.Meta`'s; and `bitWidth` carries the one thing the schema
-hints at but cannot state — see *Number encoding* below.
+Six things happened there. `///` comments became `/** */` docs; the field named `type` was renamed `Type` by the
+agent's own keyword rule; `Type` is a FlatBuffers **union**, emitted elsewhere in the file as a pack whose
+alternatives are all optional; both vectors became `[,,]` lists carrying no `[D]`, bounded by the file's
+`_DefaultMaxLengthOf` rather than by an invented per-field cap; the `= 128` default became `[Default("128")]`
+metadata rather than a bound; and `bitWidth` picked up a `// physics:` line — the one thing the schema hints at
+but cannot state. Field types are written as full paths, which is what lets Arrow's own `Binary`, `Map` and
+`Duration` keep their names beside the identically named `org.unirail.Meta` types.
 
 ## Mapping
 
