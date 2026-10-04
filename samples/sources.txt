@@ -1,0 +1,15 @@
+# Where every sample comes from: <path in samples/> <page of the original>. Written by fetch-samples.sh;
+# the converter links these pages in the headers of the descriptions.
+flatbuffers/samples/monster.fbs                          https://github.com/google/flatbuffers/blob/master/samples/monster.fbs
+flatbuffers/tests/monster_test.fbs                       https://github.com/google/flatbuffers/blob/master/tests/monster_test.fbs
+flatbuffers/tests/include_test/include_test1.fbs         https://github.com/google/flatbuffers/blob/master/tests/include_test/include_test1.fbs
+flatbuffers/tests/include_test/sub/include_test2.fbs     https://github.com/google/flatbuffers/blob/master/tests/include_test/sub/include_test2.fbs
+flatbuffers/tests/arrays_test.fbs                        https://github.com/google/flatbuffers/blob/master/tests/arrays_test.fbs
+flatbuffers/tests/optional_scalars.fbs                   https://github.com/google/flatbuffers/blob/master/tests/optional_scalars.fbs
+flatbuffers/tests/union_vector/union_vector.fbs          https://github.com/google/flatbuffers/blob/master/tests/union_vector/union_vector.fbs
+flatbuffers/reflection/reflection.fbs                    https://github.com/google/flatbuffers/blob/master/reflection/reflection.fbs
+arrow/Schema.fbs                                         https://github.com/apache/arrow/blob/main/format/Schema.fbs
+arrow/Message.fbs                                        https://github.com/apache/arrow/blob/main/format/Message.fbs
+arrow/File.fbs                                           https://github.com/apache/arrow/blob/main/format/File.fbs
+arrow/Tensor.fbs                                         https://github.com/apache/arrow/blob/main/format/Tensor.fbs
+arrow/SparseTensor.fbs                                   https://github.com/apache/arrow/blob/main/format/SparseTensor.fbs
